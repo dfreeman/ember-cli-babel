@@ -76,6 +76,17 @@ module.exports = {
     }
   },
 
+  _shouldProcessTypeScript() {
+    if (this._cachedShouldProcessTypescript === undefined) {
+      // TODO: this doesn't account for things like in-repo addons and other
+      // weird inclusion structures
+      let checker = new VersionChecker(this.parent).for('ember-cli-typescript', 'npm');
+      this._cachedShouldProcessTypescript = checker.gte('4.0.0-alpha.0');
+    }
+
+    return this._cachedShouldProcessTypescript;
+  },
+
   _importPolyfill(app) {
     let polyfillPath = 'vendor/babel-polyfill/polyfill.js';
 
@@ -255,7 +266,7 @@ module.exports = {
 
   _getExtensions(config) {
     let emberCLIBabelConfig = config['ember-cli-babel'] || {};
-    return emberCLIBabelConfig.extensions || ['js'];
+    return emberCLIBabelConfig.extensions || (this._shouldProcessTypeScript() ? ['js'] : ['js', 'ts']);
   },
 
   _getBabelOptions(config) {
@@ -263,6 +274,7 @@ module.exports = {
     let shouldCompileModules = this._shouldCompileModules(config);
     let shouldIncludeHelpers = this._shouldIncludeHelpers(config);
     let shouldIncludeDecoratorPlugins = this._shouldIncludeDecoratorPlugins(config);
+    let shouldProcessTypeScript = this._shouldProcessTypeScript();
 
     let emberCLIBabelConfig = config['ember-cli-babel'];
     let shouldRunPresetEnv = true;
@@ -291,6 +303,10 @@ module.exports = {
 
     let userPlugins = addonProvidedConfig.plugins;
     let userPostTransformPlugins = addonProvidedConfig.postTransformPlugins;
+
+    if (shouldProcessTypeScript) {
+      userPlugins = this._addTypeScriptPlugins(userPlugins.slice());
+    }
 
     if (shouldIncludeDecoratorPlugins) {
       userPlugins = this._addDecoratorPlugins(userPlugins.slice(), addonProvidedConfig.options);
@@ -339,9 +355,9 @@ module.exports = {
       addPlugin(
         plugins,
         [require.resolve('@babel/plugin-proposal-decorators'), { legacy: true }],
-        {
-          before: ['@babel/plugin-proposal-class-properties', '@babel/plugin-transform-typescript']
-        }
+        this._buildClassFeaturePluginConstraints({
+          before: ['@babel/plugin-proposal-class-properties']
+        })
       );
     }
 
@@ -356,10 +372,9 @@ module.exports = {
       addPlugin(
         plugins,
         [require.resolve('@babel/plugin-proposal-class-properties'), { loose: options.loose || false }],
-        {
-          after: ['@babel/plugin-proposal-decorators'],
-          before: ['@babel/plugin-transform-typescript']
-        }
+        this._buildClassFeaturePluginConstraints({
+          after: ['@babel/plugin-proposal-decorators']
+        })
       );
     }
 
@@ -378,6 +393,52 @@ module.exports = {
     }
 
     return plugins;
+  },
+
+  _buildClassFeaturePluginConstraints(constraints) {
+    // With older versions of ember-cli-typescript, class feature plugins like
+    // @babel/plugin-proposal-class-properties were run before the TS transform.
+    // With more recent language features like `declare` field modifiers, Babel
+    // now has assertions requiring that the TS transform runs first, so if we
+    // know we're responsible for setting that transform up, we follow those rules.
+    if (this._shouldProcessTypeScript()) {
+      constraints.after = constraints.after || [];
+      constraints.after.push('@babel/plugin-transform-typescript');
+    } else {
+      constraints.before = constraints.before || [];
+      constraints.before.push('@babel/plugin-transform-typescript');
+    }
+
+    return constraints;
+  },
+
+  _addTypeScriptPlugins(plugins) {
+    const { hasPlugin, addPlugin } = require('ember-cli-babel-plugin-helpers');
+
+    // TypeScript includes optional chaining and nullish coalescing, which are
+    // both stage 4 but not yet included automatically by @babel/preset-env
+    if (!hasPlugin(plugins, '@babel/plugin-proposal-optional-chaining')) {
+      addPlugin(plugins, require.resolve('@babel/plugin-proposal-optional-chaining'));
+    }
+
+    if (!hasPlugin(plugins, '@babel/plugin-proposal-nullish-coalescing-operator')) {
+      addPlugin(plugins, require.resolve('@babel/plugin-proposal-nullish-coalescing-operator'));
+    }
+
+    if (!hasPlugin(plugins, '@babel/plugin-transform-typescript')) {
+      addPlugin(
+        plugins,
+        [require.resolve('@babel/plugin-transform-typescript'), { allowDeclareFields: true }],
+        {
+          // This list comes from https://git.io/Je71S
+          before: [
+            '@babel/plugin-proposal-class-properties',
+            '@babel/plugin-proposal-private-methods',
+            '@babel/plugin-proposal-decorators'
+          ]
+        }
+      )
+    }
   },
 
   _getDebugMacroPlugins(config) {
